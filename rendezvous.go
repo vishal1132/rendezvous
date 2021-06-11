@@ -2,15 +2,10 @@ package rendezvous
 
 import (
 	"crypto/md5"
-	"crypto/sha1"
-	"crypto/sha256"
+	"hash"
 	"sort"
+	"sync"
 )
-
-// CalcHash takes a key as a slice of byte(so that you can marshal anything into slice of bytes)
-// and still use this. it's not interface{}, because you might be marshaling into slice of bytes by
-// your own logic, rather than a single general way to marshal.
-type CalcHash func(key []byte, node string) uint64
 
 func summize(b []byte) uint64 {
 	var val uint64 = 0
@@ -20,86 +15,116 @@ func summize(b []byte) uint64 {
 	return val
 }
 
-type Rendezvous struct {
+type rendezvous struct {
 	// represent nodes as their names/ids.
 	nodes []string
-	f     CalcHash
+	mu    sync.Mutex
+	f     hash.Hash
 }
 
-// Returns a CalcHash type from a list of hashes
-func HashFunction(hash HashName) CalcHash {
-	var scoreFuncs = map[HashName]CalcHash{
-		MD5: func(key []byte, node string) uint64 {
-			h := md5.Sum(append(key, []byte(node)...))
-			return summize(h[:])
-		},
-		SHA1: func(key []byte, node string) uint64 {
-			h := sha1.Sum(append(key, []byte(node)...))
-			return summize(h[:])
-		},
-		SHA256: func(key []byte, node string) uint64 {
-			h := sha256.Sum256(append(key, []byte(node)...))
-			return summize(h[:])
-		},
-	}
+var _ Rendezvous = (*rendezvous)(nil)
 
-	return scoreFuncs[hash]
+type Rendezvous interface {
+	GetScore(key []byte) (string, uint64)
+	GetNTop(n int, key []byte) []string
 }
+
+type nodeScoreSorter []nodescore
+
+func (n nodeScoreSorter) Len() int           { return len(n) }
+func (n nodeScoreSorter) Swap(i, j int)      { n[i], n[j] = n[j], n[i] }
+func (n nodeScoreSorter) Less(i, j int) bool { return n[i].score > n[j].score }
 
 // New creates a new rendezvous type.
 // Use this type to call any function further.
-// If you want to generate a New rendezvous from a slice of strings, use New(slice...)
-func New(f CalcHash, nodes ...string) *Rendezvous {
-	return &Rendezvous{
+// If you want to generate a New rendezvous from a slice of strings, use New(slice...).
+func New(f hash.Hash, nodes ...string) Rendezvous {
+	r := rendezvous{
 		nodes: nodes,
-		f:     f,
 	}
+	if f == nil {
+		f = md5.New()
+	}
+	r.f = f
+	return &r
 }
 
 // AddNodes accepts variadic number of string arguments.
-func (r *Rendezvous) AddNodes(nodes ...string) error {
+func (r *rendezvous) AddNodes(nodes ...string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.nodes = append(r.nodes, nodes...)
-	return nil
 }
 
-// GetNTop returns a string slice of size n
-func (r *Rendezvous) GetNTop(n int, key []byte) []string {
+// RemoveNodes removes nodes.
+func (r *rendezvous) RemoveNodes(nodes ...string) {
+	// remove nodes implementation here.
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(nodes) >= len(r.nodes) {
+		r.nodes = make([]string, 0)
+		return
+	}
+	// for _, v := range nodes {
+	// }
+}
+
+// GetNTop returns a string slice of size n.
+func (r *rendezvous) GetNTop(n int, key []byte) []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if n <= 0 || n >= len(r.nodes) {
 		// return all the nodes
 		return r.nodes
 	}
-	scores := make([]uint64, 0, len(r.nodes))
-	scoresMap := make(map[uint64]string, len(r.nodes))
+
+	scores := make([]nodescore, 0, len(r.nodes))
+	r.f.Write(key)
+
 	for _, v := range r.nodes {
-		val := r.f(key, v)
-		scores = append(scores, val)
-		scoresMap[val] = v
+		val := summize(r.f.Sum([]byte(v)))
+		scores = append(scores, nodescore{node: v, score: val})
 	}
-	// reverse sort
-	sort.Slice(scores, func(i, j int) bool { return scores[i] > scores[j] })
-	topn := make([]string, 0, n)
+
+	sort.Sort(nodeScoreSorter(scores))
+	r.f.Reset()
+
+	var nodes = make([]string, 0, n)
+
 	for i := 0; i < n; i++ {
-		topn = append(topn, scoresMap[scores[i]])
+		nodes = append(nodes, scores[i].node)
 	}
-	return topn
+
+	return nodes
+}
+
+type nodescore struct {
+	node  string
+	score uint64
 }
 
 // GetScore returns the name of the node with highest score and the socre of that node.
 // Highest score is 0 in case of error.
-func (n *Rendezvous) GetScore(key []byte) (string, uint64) {
-	if len(n.nodes) == 0 {
+func (r *rendezvous) GetScore(key []byte) (string, uint64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.nodes) == 0 {
 		return "", 0
 	}
 
 	var highestScore uint64 = 0
 	var highestNodeID uint64 = 0
 
-	for i, v := range n.nodes {
-		val := n.f(key, v)
+	r.f.Write(key)
+
+	for i, v := range r.nodes {
+		val := summize(r.f.Sum([]byte(v)))
 		if val > highestScore {
 			highestScore = val
 			highestNodeID = uint64(i)
 		}
 	}
-	return n.nodes[highestNodeID], uint64(highestScore)
+	r.f.Reset()
+
+	return r.nodes[highestNodeID], uint64(highestScore)
 }

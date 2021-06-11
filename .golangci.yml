@@ -1,0 +1,18 @@
+run:
+  timeout: 5m
+
+  ## how many issues to be found to exit with non
+  issues-exit-code: 1
+
+linters:
+  enable:
+    - godox
+    - golint
+    - stylecheck
+    - godot
+    - cyclop
+    - dogsled
+    - dupl
+    - errcheck
+    - errorlint
+    - funlen
